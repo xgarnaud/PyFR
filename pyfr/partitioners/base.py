@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 
 from collections import Counter, defaultdict, namedtuple
+import itertools as it
 import re
 import uuid
 
@@ -24,6 +25,7 @@ class BasePartitioner(object):
     def __init__(self, partwts, elewts=None, order=None, opts={}):
         self.partwts = partwts
         self.nparts = len(partwts)
+        self.nsubeles = 64
 
         if elewts is not None:
             self.elewts = elewts
@@ -114,9 +116,9 @@ class BasePartitioner(object):
 
         return newsoln
 
-    def _construct_graph(self, mesh):
+    def _construct_graph(self, con):
         # Edges of the dual graph
-        con = mesh['con_p0'].astype('U4,i4,i1,i1')
+        con = con[['f0', 'f1']].astype('U4,i4')
         con = np.hstack([con, con[::-1]])
 
         # Sort by the left hand side
@@ -124,7 +126,7 @@ class BasePartitioner(object):
         con = con[:, idx]
 
         # Left and right hand side element types/indicies
-        lhs, rhs = con[['f0', 'f1']]
+        lhs, rhs = con
 
         # Compute vertex offsets
         vtab = np.where(lhs[1:] != lhs[:-1])[0]
@@ -147,24 +149,45 @@ class BasePartitioner(object):
         pass
 
     def _renumber_verts(self, mesh, vetimap, vparts):
-        vpartmap = dict(zip(vetimap, vparts))
-        bndeti = set()
+        # Pre-process the connectivity array
+        con = mesh['con_p0'][['f0', 'f1']].astype('U4,i4')
+        con = [(tuple(l), tuple(r)) for l, r in zip(*con)]
 
         # Identify vertices whose edges cross partition boundaries
-        for l, r in zip(*mesh['con_p0'][['f0', 'f1']].astype('U4,i4')):
-            l, r = tuple(l), tuple(r)
-
+        vpartmap, bndeti = dict(zip(vetimap, vparts)), set()
+        for l, r in con:
             if vpartmap[l] != vpartmap[r]:
                 bndeti |= {l, r}
 
-        # Move boundary vertices to the front of the list
+        # Start by assigning the lowest numbers to boundary elements
         nvetimap, nvparts = list(bndeti), [vpartmap[eti] for eti in bndeti]
 
-        # Followed by the internal vertices
-        for eti, part in zip(vetimap, vparts):
-            if eti not in bndeti:
-                nvetimap.append(eti)
-                nvparts.append(part)
+        # Next, construct the per-partition connectivity arrays
+        pscon = [[] for i in range(self.nparts)]
+        for l, r in con:
+            if l not in bndeti and r not in bndeti:
+                pscon[vpartmap[l]].append([l, r])
+
+        # Use sub-partitioning to assign interior element numbers
+        for part, scon in enumerate(pscon):
+            # Construct a graph for the this partition
+            scon = np.array(scon, dtype='U4,i4').T
+            sgraph, svetimap = self._construct_graph(scon)
+
+            # Determine the number of sub-partitions
+            nsp = len(svetimap) // self.nsubeles + 1
+
+            # Partition the graph
+            svparts = self._partition_graph(sgraph, [1]*nsp)
+
+            # Group elements according to their sub-partition number
+            spvetimap = [[] for i in range(nsp)]
+            for eti, spart in zip(svetimap, svparts):
+                spvetimap[spart].append(eti)
+
+            # Append to the global list
+            nvetimap.extend(it.chain(*spvetimap))
+            nvparts.extend([part]*len(svetimap))
 
         return nvetimap, nvparts
 
@@ -269,7 +292,7 @@ class BasePartitioner(object):
         # Perform the partitioning
         if self.nparts > 1:
             # Obtain the dual graph for this mesh
-            graph, vetimap = self._construct_graph(mesh)
+            graph, vetimap = self._construct_graph(mesh['con_p0'])
 
             # Partition the graph
             vparts = self._partition_graph(graph, self.partwts)
