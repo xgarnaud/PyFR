@@ -9,6 +9,7 @@ from pyfr.plugins.residual import ResidualPlugin
 from pyfr.plugins.sampler import SamplerPlugin
 from pyfr.plugins.tavg import TavgPlugin
 from pyfr.plugins.writer import WriterPlugin
+from pyfr.plugins.coprocess import CoprocessPlugin
 from pyfr.util import subclass_where
 
 
