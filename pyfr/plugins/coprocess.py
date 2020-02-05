@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 
+import os
 import numpy as np
 
 from pyfr.plugins.base import BasePlugin
@@ -17,9 +18,11 @@ class CoprocessPlugin(BasePlugin):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
 
-        self.nsteps = self.cfg.getint(self.cfgsect, 'nsteps')
         self.divisor = self.cfg.getint('solver', 'order') + 1
         self.dtype = np.float32
+
+        # Output time step
+        self.dt_out = self.cfg.getfloat(self.cfgsect, 'dt-out')
 
         self.planes = {}
         for name, value in self.cfg.items(self.cfgsect).items():
@@ -29,12 +32,25 @@ class CoprocessPlugin(BasePlugin):
                 origin = [float(x) for x in value.split(',')]
                 value = self.cfg.get(self.cfgsect, '%s_normal'%nname)
                 normal = [float(x) for x in value.split(',')]
-                self.planes[nname] = (origin, normal)
+                basename = self.cfg.get(self.cfgsect, '%s_basename'%nname)
+                print(basename)
+                self.planes[nname] = (origin, normal, basename)
 
         intg = args[0]
         self.mesh = intg.system.mesh
         self.elementscls = intg.system.elementscls
         self._create_mb()
+
+        # Register our output times with the integrator
+        intg.call_plugin_dt(self.dt_out)
+        self.tout_last = intg.tcurr
+
+        self.basedir = self.cfg.get(self.cfgsect, 'basedir')
+        
+        # If we're not restarting then write out the initial solution
+        if not intg.isrestart:
+            self.tout_last -= self.dt_out
+            self(intg)
 
     def _create_mb(self):
 
@@ -212,25 +228,27 @@ class CoprocessPlugin(BasePlugin):
 
     def __call__(self, intg):
 
-        if intg.nacptsteps % self.nsteps == 0:
-            print('coprocess iter %d'%intg.nacptsteps)
+        if intg.tcurr - self.tout_last < self.dt_out - self.tol:
+            return
+        
+        # Solution
+        soln = intg.soln
+        assert(len(soln) == 1)
+        soln = soln[0].swapaxes(0, 1)
 
-            # Solution
-            soln = intg.soln
-            assert(len(soln) == 1)
-            soln = soln[0].swapaxes(0, 1)
+        self._update_sol(soln)
 
-            self._update_sol(soln)
+        for name, (origin, normal, basename) in self.planes.items():
+            tmp = self._cut_plane(origin, normal)
 
-            for name, (origin, normal) in self.planes.items():
-                tmp = self._cut_plane(origin, normal)
+            for idx, grid in enumerate(tmp):
+                writer = vtk.vtkXMLPolyDataWriter()
+                writer.SetCompressorTypeToNone()
+                writer.SetDataModeToBinary()
+                writer.SetInputData(grid)
+                fname = os.path.join(self.basedir, basename.format(iblk=idx, t=intg.tcurr)+'.vtp')
+                writer.SetFileName(fname)
+                writer.Write()
 
-                for idx, grid in enumerate(tmp):
-                    writer = vtk.vtkXMLPolyDataWriter()
-                    writer.SetCompressorTypeToNone()
-                    writer.SetDataModeToBinary()
-                    writer.SetInputData(grid)
-                    writer.SetFileName('%s_%d_%d.vtp'%(name,idx,intg.nacptsteps))
-                    writer.Write()
-
-            print('done')
+        # Update the last output time
+        self.tout_last = intg.tcurr
