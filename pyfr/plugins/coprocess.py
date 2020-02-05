@@ -18,7 +18,7 @@ class CoprocessPlugin(BasePlugin):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
 
-        self.divisor = self.cfg.getint('solver', 'order') + 1
+        self.divisor = self.cfg.getint('solver', 'order')
         self.dtype = np.float32
 
         # Output time step
